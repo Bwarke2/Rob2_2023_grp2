@@ -28,9 +28,19 @@ function [center,majorAxis,minorAxis,radii,Eccentricity] = find_circle(image)
     %Get the biggest circle
     circles = [centers,stats.MajorAxisLength,stats.MinorAxisLength,radiis,stats.Eccentricity];
     circles = sortrows(circles,4,"descend");
+    radii = circles(1,5);
+    if radii < 50
+        center = [0,0];
+        majorAxis = 0;
+        minorAxis = 0;
+        radii = 0;
+        Eccentricity = 1;
+        return
+    end
+
     center = circles(1,1:2);
     majorAxis = circles(1,3);
     minorAxis = circles(1,4);
-    radii = circles(1,5);
+    
     Eccentricity = circles(1,6);
 end
