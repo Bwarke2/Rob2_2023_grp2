@@ -7,37 +7,40 @@ host_ip = "192.168.43.31";
 setenv('ROS_MASTER_URI','http://' + rpi_ip + ':11311')
 setenv('ROS_IP',host_ip)
 rosinit('http://'+rpi_ip+':11311','NodeHost',host_ip);
-%% Load map
+% Load map
 %map_rgb = imread("Shannon_Bitmap_JPG.jpg");
 %map_rgb = imread("Shannon_v2.jpg");
-map_rgb = imread("Shannon_v3.jpg");
+map_rgb = imread("Shannon_v4.jpg");
 map_gray = rgb2gray(map_rgb);
 map_bin_inv = im2bw(map_gray,0.5);
 map_bin = ~map_bin_inv;
 map = occupancyMap(map_bin,21);
-map2 = occupancyMap(map_bin,21);
-inflate(map2,0.5);
-show(map)
+map_navi_rgb = imread("Shannon_v3_bord.jpg");
+map_navi_gray = rgb2gray(map_navi_rgb);
+map_navi_bin_inv = im2bw(map_navi_gray,0.5);
+map_navi_bin = ~map_navi_bin_inv;
+map_navi = occupancyMap(map_navi_bin,21);
+inflate(map_navi,0.3);
+show(map_navi)
 
 % Generate path nodes
-prm = mobileRobotPRM(map2,1000);
+prm = mobileRobotPRM(map_navi,1000);
 prm.ConnectionDistance = 5;
+test_start = [8.7 23.8];
 prm_start = [48 25];
-prm_end_1 = [7 10];
-prm_end_2 = [26.7 2.38];
+prm_end_1 = [7.8 9.4];
+prm_end_2 = [27.7 3.4];
 show(prm)
 path = findpath(prm,prm_start,prm_end_1);
-
-figure(1);
 % Unused
 figure(2);
 show(map);
 hold on, plot(prm_start(1), prm_start(2), 'r*'), text(prm_start(1), prm_start(2), 'START')
-hold on, plot(prm_end_1(1), prm_end_1(2), 'ro'), text(prm_end_1(1), prm_end_2(2), 'CP1')
-hold on, plot(prm_end_2(1), prm_end_2(2), 'ro'), text(prm_end_2(2), prm_end_2(2), 'CP2')
+hold on, plot(prm_end_1(1), prm_end_1(2), 'ro'), text(prm_end_1(1), prm_end_1(2), 'CP1')
+hold on, plot(prm_end_2(1), prm_end_2(2), 'ro'), text(prm_end_2(1), prm_end_2(2), 'CP2')
 plot(path(:,1), path(:,2))
 
-%% 
+%%
 
 % ROS setup
 robotCmd = rospublisher("/cmd_vel", "DataFormat","struct");
@@ -54,16 +57,6 @@ p_con.DesiredLinearVelocity = 3;
 p_con.MaxAngularVelocity = pi/2;
 p_con.Waypoints = path;
 
-% Calculating initial position. (Kinda unused for monte carlo)
-% odomMsg = receive(odomSub,3);
-% pose = odomMsg.Pose.Pose;
-% x = pose.Position.X;
-% y = pose.Position.Y;
-% quat = pose.Orientation;
-% angles = quat2eul([quat.W quat.X quat.Y quat.Z]);  
-% x_zero = x;
-% y_zero = y;
-
 % Path history for plotting
 x_hist = [];
 y_hist = [];
@@ -78,7 +71,7 @@ rangeFinderModel.Map = map;
 rangeFinderModel.SensorPose = [0 0 0];
 rangeFinderModel.NumBeams = 360;
 rangeFinderModel.MeasurementNoise = 1;
-
+%
 mcl = monteCarloLocalization;
 mcl.SensorModel.Map = map;
 
@@ -108,21 +101,27 @@ i = 0;
 atB = 0;
 while (atB == 0)
     % Get scans and odometry data
+    Linescan = receive(scansub);
     scan = lidarScan(receive(scansub));
     ranges = double(scan.Ranges);
     ranges(ranges <= 0.1) = inf; % Remove ranges equal to zero
     range_min = min(ranges);
+    angles = Linescan.AngleMin:Linescan.AngleIncrement:Linescan.AngleMax;
     if range_min < avoid_dist %if something is within 40 cm
         %Use PD regulator to avoid obstacles
         error = avoid_dist - range_min;        % Calculating error
         d = error - error_old;  % Calculating derivative of error
-        disp(d);
         ang_v = error*6 + 30*d; % PD-controller
 
         error_old = error;      % Updating the previous error
 
         velMsg.Linear.X = 0.2;  
-        velMsg.Angular.Z = ang_v;
+        %Check if min is on the left or on the right of scan
+        if angles(ranges==range_min) < pi
+            velMsg.Angular.Z = -ang_v;
+        else
+            velMsg.Angular.Z = ang_v;
+        end
         send(robotCmd, velMsg); % Sending velocities to Turtlebot
     else
         odomMsg = odomSub.LatestMessage;
@@ -156,27 +155,24 @@ while (atB == 0)
 
         distanceToGoal = norm(est_position(1:2) - prm_end_1);
         if distanceToGoal < goalRadius
-            atGoal = 1;
+            atB = 1;
         end
     end
 end
 
-%% Find and drive to circle
+% Find and drive to circle
 FCC = FindCircleClass;
 FCC.driveToCircle();
 
 % Now we are at B and ready to drive to C
-
-
 %%
+
+test_start2 = [25 6.5];
 % Generate path nodes
-prm = mobileRobotPRM(map2,1000);
+prm = mobileRobotPRM(map_navi,1000);
 prm.ConnectionDistance = 5;
-prm_start = [48 25];
-prm_end_1 = [7 10];
-prm_end_2 = [26.7 2.38];
 show(prm)
-path = findpath(prm,prm_start,prm_end_1);
+path = findpath(prm,test_start2,prm_end_2);
 
 figure(1);
 % Unused
@@ -187,16 +183,14 @@ hold on, plot(prm_end_1(1), prm_end_1(2), 'ro'), text(prm_end_1(1), prm_end_2(2)
 hold on, plot(prm_end_2(1), prm_end_2(2), 'ro'), text(prm_end_2(2), prm_end_2(2), 'CP2')
 plot(path(:,1), path(:,2))
 
-%%
-% Monte Carlo Localization
-odometryModel = odometryMotionModel;
-odometryModel.Noise = [0.2 0.2 0.2 0.2];
-rangeFinderModel = likelihoodFieldSensorModel;
-rangeFinderModel.SensorLimits = [0.15 4];
-rangeFinderModel.Map = map;
-rangeFinderModel.SensorPose = [0 0 0];
-rangeFinderModel.NumBeams = 360;
-rangeFinderModel.MeasurementNoise = 1;
+
+
+% PP controller setup
+p_con = controllerPurePursuit();
+p_con.LookaheadDistance = 0.8;
+p_con.DesiredLinearVelocity = 3;
+p_con.MaxAngularVelocity = pi/2;
+p_con.Waypoints = path;
 
 mcl = monteCarloLocalization;
 mcl.SensorModel.Map = map;
@@ -212,7 +206,7 @@ mcl.ResamplingInterval = 3;
 mcl.ParticleLimits = [500 5000];
 %mcl.ParticleLimits = [500 2000];
 mcl.GlobalLocalization = false;
-mcl.InitialPose = est_position;
+mcl.InitialPose = [test_start2 0];
 mcl.InitialCovariance = eye(3)*0.5;
 
 % setup values for PD
@@ -224,24 +218,30 @@ goalRadius = 0.3;
 
 visualizationHelper = ExampleHelperAMCLVisualization(map);
 i = 0;
-atB = 0;
-while (atB == 0)
+atC = 0;
+while (atC == 0)
     % Get scans and odometry data
+    Linescan = receive(scansub);
     scan = lidarScan(receive(scansub));
     ranges = double(scan.Ranges);
     ranges(ranges <= 0.1) = inf; % Remove ranges equal to zero
     range_min = min(ranges);
+    angles = Linescan.AngleMin:Linescan.AngleIncrement:Linescan.AngleMax;
     if range_min < avoid_dist %if something is within 40 cm
         %Use PD regulator to avoid obstacles
         error = avoid_dist - range_min;        % Calculating error
         d = error - error_old;  % Calculating derivative of error
-        disp(d);
         ang_v = error*6 + 30*d; % PD-controller
 
         error_old = error;      % Updating the previous error
 
-        velMsg.Linear.X = 0.2;  
-        velMsg.Angular.Z = ang_v;
+        velMsg.Linear.X = 0.2;
+        %Check if min is on the left or on the right of scan
+        if angles(ranges==range_min) < pi
+            velMsg.Angular.Z = -ang_v;
+        else
+            velMsg.Angular.Z = ang_v;
+        end
         send(robotCmd, velMsg); % Sending velocities to Turtlebot
     else
         odomMsg = odomSub.LatestMessage;
@@ -275,11 +275,14 @@ while (atB == 0)
 
         distanceToGoal = norm(est_position(1:2) - prm_end_2);
         if distanceToGoal < goalRadius
-            atGoal = 1;
+            atC = 1;
         end
     end
 end
 
+% Find and drive to circle
+FCC = FindCircleClass;
+FCC.driveToCircle();
 
 %% Plotting
 figure(4)

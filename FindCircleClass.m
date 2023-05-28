@@ -83,7 +83,7 @@ classdef FindCircleClass
             end
             %%
             
-            while eccentricity_old > 0.2
+            while eccentricity_old > 0.3
                 image_msg = receive(image_sub);
                 image_msg.Format = "rgb8;";
                 image = readImage(image_msg); 
@@ -100,7 +100,7 @@ classdef FindCircleClass
                 disp("e_old:")
                 disp(eccentricity_old)
                 
-                ang_v = PID_controller(eccentricity,0,0.2,0,1);
+                ang_v = PID_controller(eccentricity,0,0.5,0,1);
                 %disp("ang_v:")
                 %disp(ang_v)
                 eccentricity_old = eccentricity;

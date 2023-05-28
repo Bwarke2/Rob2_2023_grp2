@@ -97,11 +97,6 @@ while (atGoal == 0)
     scan = lidarScan(receive(scansub));
     ranges = double(scan.Ranges);
 
-    range_min = min(ranges);
-    if range_min < 0.40 %if something is within 40 cm
-        
-    end
-
     %angle = scan.AngleMin:scan.AngleIncrement:scan.AngleMax;
 
     %odomMsg = receive(odomSub,3);
@@ -169,7 +164,7 @@ FCC.driveToCircle();
 prm = mobileRobotPRM(map2,1000);
 prm.ConnectionDistance = 5;
 show(prm)
-path = findpath(prm,prm_start,prm_end_1);
+path = findpath(prm,prm_end_1,prm_end_2);
 
 figure(1);
 % Unused
@@ -247,9 +242,23 @@ while (atB == 0)
     if isUpdated
         i = i + 1;
         plotStep(visualizationHelper, mcl, est_position, scan, i)
-        if mod(i,50) == 0
+        if mod(i,70) == 0
             release(mcl)
-            mcl = setupMCL(odometryModel,rangeFinderModel,est_position,map);
+            mcl = monteCarloLocalization;
+            mcl.SensorModel.Map = map;
+            
+            mcl.UseLidarScan = true;
+            mcl.MotionModel = odometryModel;
+            mcl.SensorModel = rangeFinderModel;
+            
+            mcl.UpdateThresholds = [0.0, 0.0, 0.0];
+            mcl.ResamplingInterval = 3;
+            %mcl.ResamplingInterval = 1;
+            
+            mcl.ParticleLimits = [500 5000];
+            %mcl.ParticleLimits = [500 2000];
+            mcl.InitialPose = est_position;
+            mcl.InitialCovariance = eye(3)*0.5;
         end
     end
 
