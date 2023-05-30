@@ -1,0 +1,291 @@
+% Final Project - Localization
+clc; clear all; close all;
+%%
+rosshutdown
+rpi_ip = "192.168.43.233";
+host_ip = "192.168.43.31";
+setenv('ROS_MASTER_URI','http://' + rpi_ip + ':11311')
+setenv('ROS_IP',host_ip)
+rosinit('http://'+rpi_ip+':11311','NodeHost',host_ip);
+% Load map
+%map_rgb = imread("Shannon_Bitmap_JPG.jpg");
+%map_rgb = imread("Shannon_v2.jpg");
+map_rgb = imread("Shannon_v4.jpg");
+map_gray = rgb2gray(map_rgb);
+map_bin_inv = im2bw(map_gray,0.5);
+map_bin = ~map_bin_inv;
+map = occupancyMap(map_bin,21);
+map_navi_rgb = imread("Shannon_v3_bord.jpg");
+map_navi_gray = rgb2gray(map_navi_rgb);
+map_navi_bin_inv = im2bw(map_navi_gray,0.5);
+map_navi_bin = ~map_navi_bin_inv;
+map_navi = occupancyMap(map_navi_bin,21);
+inflate(map_navi,0.3);
+show(map_navi)
+
+% Generate path nodes
+prm = mobileRobotPRM(map_navi,1000);
+prm.ConnectionDistance = 5;
+test_start = [8.7 23.8];
+prm_start = [48 25];
+prm_end_1 = [7.8 9.4];
+prm_end_2 = [27.7 3.4];
+show(prm)
+path = findpath(prm,prm_start,prm_end_1);
+% Unused
+figure(2);
+show(map);
+hold on, plot(prm_start(1), prm_start(2), 'r*'), text(prm_start(1), prm_start(2), 'START')
+hold on, plot(prm_end_1(1), prm_end_1(2), 'ro'), text(prm_end_1(1), prm_end_1(2), 'CP1')
+hold on, plot(prm_end_2(1), prm_end_2(2), 'ro'), text(prm_end_2(1), prm_end_2(2), 'CP2')
+plot(path(:,1), path(:,2))
+
+%%
+
+% ROS setup
+robotCmd = rospublisher("/cmd_vel", "DataFormat","struct");
+velMsg = rosmessage(robotCmd);
+odomSub = rossubscriber("/odom");
+odomMsg = receive(odomSub,3);
+scansub = rossubscriber("/scan");
+pause(1) %Wait to allow for setup
+
+% PP controller setup
+p_con = controllerPurePursuit();
+p_con.LookaheadDistance = 0.8;
+p_con.DesiredLinearVelocity = 3;
+p_con.MaxAngularVelocity = pi/2;
+p_con.Waypoints = path;
+
+% Path history for plotting
+x_hist = [];
+y_hist = [];
+theta_hist = [];
+
+% Monte Carlo Localization
+odometryModel = odometryMotionModel;
+odometryModel.Noise = [0.2 0.2 0.2 0.2];
+rangeFinderModel = likelihoodFieldSensorModel;
+rangeFinderModel.SensorLimits = [0.15 4];
+rangeFinderModel.Map = map;
+rangeFinderModel.SensorPose = [0 0 0];
+rangeFinderModel.NumBeams = 360;
+rangeFinderModel.MeasurementNoise = 1;
+%
+mcl = monteCarloLocalization;
+mcl.SensorModel.Map = map;
+
+mcl.UseLidarScan = true;
+mcl.MotionModel = odometryModel;
+mcl.SensorModel = rangeFinderModel;
+
+mcl.UpdateThresholds = [0.0, 0.0, 0.0];
+mcl.ResamplingInterval = 3;
+%mcl.ResamplingInterval = 1;
+
+mcl.ParticleLimits = [500 5000];
+%mcl.ParticleLimits = [500 2000];
+mcl.GlobalLocalization = false;
+mcl.InitialPose = [48 25.0 1.5*pi];
+mcl.InitialCovariance = eye(3)*0.5;
+
+% setup values for PD
+avoid_dist = 0.40;
+error_old = 0;
+
+% Distance to goal that is accepted
+goalRadius = 0.3;
+
+visualizationHelper = ExampleHelperAMCLVisualization(map);
+i = 0;
+atB = 0;
+while (atB == 0)
+    % Get scans and odometry data
+    Linescan = receive(scansub);
+    scan = lidarScan(receive(scansub));
+    ranges = double(scan.Ranges);
+    ranges(ranges <= 0.1) = inf; % Remove ranges equal to zero
+    range_min = min(ranges);
+    angles = Linescan.AngleMin:Linescan.AngleIncrement:Linescan.AngleMax;
+    if range_min < avoid_dist %if something is within 40 cm
+        %Use PD regulator to avoid obstacles
+        error = avoid_dist - range_min;        % Calculating error
+        d = error - error_old;  % Calculating derivative of error
+        ang_v = error*6 + 30*d; % PD-controller
+
+        error_old = error;      % Updating the previous error
+
+        velMsg.Linear.X = 0.2;  
+        %Check if min is on the left or on the right of scan
+        if angles(ranges==range_min) < pi
+            velMsg.Angular.Z = -ang_v;
+        else
+            velMsg.Angular.Z = ang_v;
+        end
+        send(robotCmd, velMsg); % Sending velocities to Turtlebot
+    else
+        odomMsg = odomSub.LatestMessage;
+        odomQuat = [odomMsg.Pose.Pose.Orientation.W, odomMsg.Pose.Pose.Orientation.X, ...
+        odomMsg.Pose.Pose.Orientation.Y, odomMsg.Pose.Pose.Orientation.Z];
+        odomRotation = quat2eul(odomQuat);
+        pose = [odomMsg.Pose.Pose.Position.X, odomMsg.Pose.Pose.Position.Y odomRotation(1)];
+    
+        [isUpdated,est_position,covariance] = mcl(pose,scan);
+    
+        [v,ang_v] = p_con([est_position(1),est_position(2),est_position(3)]);    
+        velMsg.Linear.X = v;
+        velMsg.Angular.Z = ang_v;
+        send(robotCmd, velMsg);
+        
+        error_old = 0; %There is no error
+
+        % Save position for plotting
+        x_hist(end+1) = est_position(1);
+        y_hist(end+1) = est_position(2);
+        theta_hist(end+1) = est_position(3);
+        
+        if isUpdated
+            i = i + 1;
+            plotStep(visualizationHelper, mcl, est_position, scan, i)
+            if mod(i,50) == 0
+                release(mcl)
+                mcl = setupMCL(odometryModel,rangeFinderModel,est_position,map);
+            end
+        end
+
+        distanceToGoal = norm(est_position(1:2) - prm_end_1);
+        if distanceToGoal < goalRadius
+            atB = 1;
+        end
+    end
+end
+
+% Find and drive to circle
+FCC = FindCircleClass;
+FCC.driveToCircle();
+
+% Now we are at B and ready to drive to C
+%%
+
+test_start2 = [25 6.5];
+% Generate path nodes
+prm = mobileRobotPRM(map_navi,1000);
+prm.ConnectionDistance = 5;
+show(prm)
+path = findpath(prm,test_start2,prm_end_2);
+
+figure(1);
+% Unused
+figure(2);
+show(map);
+hold on, plot(prm_start(1), prm_start(2), 'r*'), text(prm_start(1), prm_start(2), 'START')
+hold on, plot(prm_end_1(1), prm_end_1(2), 'ro'), text(prm_end_1(1), prm_end_2(2), 'CP1')
+hold on, plot(prm_end_2(1), prm_end_2(2), 'ro'), text(prm_end_2(2), prm_end_2(2), 'CP2')
+plot(path(:,1), path(:,2))
+
+
+
+% PP controller setup
+p_con = controllerPurePursuit();
+p_con.LookaheadDistance = 0.8;
+p_con.DesiredLinearVelocity = 3;
+p_con.MaxAngularVelocity = pi/2;
+p_con.Waypoints = path;
+
+mcl = monteCarloLocalization;
+mcl.SensorModel.Map = map;
+
+mcl.UseLidarScan = true;
+mcl.MotionModel = odometryModel;
+mcl.SensorModel = rangeFinderModel;
+
+mcl.UpdateThresholds = [0.0, 0.0, 0.0];
+mcl.ResamplingInterval = 3;
+%mcl.ResamplingInterval = 1;
+
+mcl.ParticleLimits = [500 5000];
+%mcl.ParticleLimits = [500 2000];
+mcl.GlobalLocalization = false;
+mcl.InitialPose = [test_start2 0];
+mcl.InitialCovariance = eye(3)*0.5;
+
+% setup values for PD
+avoid_dist = 0.30;
+error_old = 0;
+
+% Distance to goal that is accepted
+goalRadius = 0.3;
+
+visualizationHelper = ExampleHelperAMCLVisualization(map);
+i = 0;
+atC = 0;
+while (atC == 0)
+    % Get scans and odometry data
+    Linescan = receive(scansub);
+    scan = lidarScan(receive(scansub));
+    ranges = double(scan.Ranges);
+    ranges(ranges <= 0.1) = inf; % Remove ranges equal to zero
+    range_min = min(ranges);
+    angles = Linescan.AngleMin:Linescan.AngleIncrement:Linescan.AngleMax;
+    if range_min < avoid_dist %if something is within 40 cm
+        %Use PD regulator to avoid obstacles
+        error = avoid_dist - range_min;        % Calculating error
+        d = error - error_old;  % Calculating derivative of error
+        ang_v = error*6 + 30*d; % PD-controller
+
+        error_old = error;      % Updating the previous error
+
+        velMsg.Linear.X = 0.2;
+        %Check if min is on the left or on the right of scan
+        if angles(ranges==range_min) < pi
+            velMsg.Angular.Z = -ang_v;
+        else
+            velMsg.Angular.Z = ang_v;
+        end
+        send(robotCmd, velMsg); % Sending velocities to Turtlebot
+    else
+        odomMsg = odomSub.LatestMessage;
+        odomQuat = [odomMsg.Pose.Pose.Orientation.W, odomMsg.Pose.Pose.Orientation.X, ...
+        odomMsg.Pose.Pose.Orientation.Y, odomMsg.Pose.Pose.Orientation.Z];
+        odomRotation = quat2eul(odomQuat);
+        pose = [odomMsg.Pose.Pose.Position.X, odomMsg.Pose.Pose.Position.Y odomRotation(1)];
+    
+        [isUpdated,est_position,covariance] = mcl(pose,scan);
+    
+        [v,ang_v] = p_con([est_position(1),est_position(2),est_position(3)]);    
+        velMsg.Linear.X = v;
+        velMsg.Angular.Z = ang_v;
+        send(robotCmd, velMsg);
+        
+        error_old = 0; %There is no error
+
+        % Save position for plotting
+        x_hist(end+1) = est_position(1);
+        y_hist(end+1) = est_position(2);
+        theta_hist(end+1) = est_position(3);
+        
+        if isUpdated
+            i = i + 1;
+            plotStep(visualizationHelper, mcl, est_position, scan, i)
+            if mod(i,50) == 0
+                release(mcl)
+                mcl = setupMCL(odometryModel,rangeFinderModel,est_position,map);
+            end
+        end
+
+        distanceToGoal = norm(est_position(1:2) - prm_end_2);
+        if distanceToGoal < goalRadius
+            atC = 1;
+        end
+    end
+end
+
+% Find and drive to circle
+FCC = FindCircleClass;
+FCC.driveToCircle();
+
+%% Plotting
+figure(4)
+hold on
+show(map);
+hold on, plot(x_hist, y_hist);
